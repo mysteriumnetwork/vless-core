@@ -1,6 +1,7 @@
 name: Release Xray core
 
-# Builds XRay.xcframework and publishes it as a release asset.
+# Builds XRay.xcframework and XRay.aar and publishes both as release assets,
+# so one tag pins Apple and Android to the same Xray-core build.
 #
 # The framework is ~60 MB zipped and is rebuilt on every Xray-core bump, so it
 # is deliberately not committed. Package.swift consumes it as a remote
@@ -23,7 +24,7 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  build-apple:
     # macOS because `gomobile bind -target=ios` needs the iphoneos and
     # iphonesimulator SDKs, which only ship with Xcode.
     runs-on: macos-15
@@ -60,6 +61,78 @@ jobs:
           echo "checksum=$checksum" >> "$GITHUB_OUTPUT"
           echo "size=$(du -h XRay.xcframework.zip | cut -f1)" >> "$GITHUB_OUTPUT"
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xcframework
+          path: Artifacts/XRay.xcframework.zip
+          retention-days: 1
+
+      - name: Record checksum
+        run: |
+          echo "${{ steps.package.outputs.checksum }}" > checksum.txt
+          echo "${{ steps.package.outputs.size }}" > size.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-meta
+          path: |
+            checksum.txt
+            size.txt
+          retention-days: 1
+
+  build-android:
+    # Linux, not macOS: gomobile bind -target=android needs only the NDK, and
+    # the Linux images ship one.
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: third_party/xray-mobile/go.mod
+          cache-dependency-path: third_party/xray-mobile/go.sum
+
+      - name: Install gomobile
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Install the pinned NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          # Must match the consuming app's ndkVersion: a different NDK links a
+          # different libc++.
+          ndk-version: r28c
+          local-cache: true
+
+      - name: Initialise gomobile
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: gomobile init
+
+      - name: Build the aar
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: ./scripts/build_xray_android.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aar
+          path: Artifacts/XRay.aar
+          retention-days: 1
+
+  publish:
+    needs: [build-apple, build-android]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+
       - name: Resolve tag
         id: tag
         run: |
@@ -67,34 +140,50 @@ jobs:
           [ -n "$tag" ] || tag="${GITHUB_REF_NAME}"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
+      - name: Read the Apple checksum
+        id: apple
+        run: |
+          echo "checksum=$(cat assets/apple-meta/checksum.txt)" >> "$GITHUB_OUTPUT"
+          echo "size=$(cat assets/apple-meta/size.txt)" >> "$GITHUB_OUTPUT"
+
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Both assets go up together: a release carrying only one of them
+          # would let the platforms drift onto different cores.
           gh release create "${{ steps.tag.outputs.tag }}" \
-            Artifacts/XRay.xcframework.zip \
+            assets/xcframework/XRay.xcframework.zip \
+            assets/aar/XRay.aar \
             --title "${{ steps.tag.outputs.tag }}" \
             --notes "Trimmed Xray-core built from third_party/xray-mobile.
 
-          SHA-256: \`${{ steps.package.outputs.checksum }}\`" \
+          \`XRay.xcframework.zip\` SHA-256: \`${{ steps.apple.outputs.checksum }}\`" \
             || gh release upload "${{ steps.tag.outputs.tag }}" \
-                 Artifacts/XRay.xcframework.zip --clobber
+                 assets/xcframework/XRay.xcframework.zip \
+                 assets/aar/XRay.aar --clobber
 
       - name: Summary
         run: |
-          url="https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.tag }}/XRay.xcframework.zip"
+          base="https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.tag }}"
           {
             echo "### Xray core published"
             echo
-            echo "Size: ${{ steps.package.outputs.size }}"
+            echo "Apple: ${{ steps.apple.outputs.size }}"
             echo
             echo "Update \`Package.swift\`:"
             echo
             echo '```swift'
             echo '.binaryTarget('
             echo '  name: "XRay",'
-            echo "  url: \"$url\","
-            echo "  checksum: \"${{ steps.package.outputs.checksum }}\""
+            echo "  url: \"$base/XRay.xcframework.zip\","
+            echo "  checksum: \"${{ steps.apple.outputs.checksum }}\""
             echo ')'
+            echo '```'
+            echo
+            echo "Update \`xrayCoreTag\` in vless_dart/android/build.gradle:"
+            echo
+            echo '```groovy'
+            echo "ext.xrayCoreTag = '${{ steps.tag.outputs.tag }}'"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

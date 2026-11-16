@@ -1,4 +1,4 @@
-# vless-apple
+# vless-core
 
 The Apple packet-tunnel engine for VLESS: a trimmed [Xray-core][xray] and
 [hev-socks5-tunnel][hev], packaged as a SwiftPM library for iOS and macOS.
@@ -94,7 +94,7 @@ change; a disk check would be served stale.
 
 To try native changes in the Flutter example, add this local package to the
 example's Xcode workspace alongside `Runner.xcodeproj`. Xcode then overrides the
-remote `vless-apple` dependency with this checkout. Building the unchanged
+remote `vless-core` dependency with this checkout. Building the unchanged
 Flutter workspace alone still uses its published package version. A live VPN
 test requires a signed packet-tunnel extension; an unsigned build validates
 compilation only. With the modified extension active, an IPv6-only probe should

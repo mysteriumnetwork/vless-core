@@ -1,4 +1,4 @@
-module github.com/mysteriumnetwork/vless-apple/xray-mobile
+module github.com/mysteriumnetwork/vless-core/xray-mobile
 
 go 1.27.3
 
