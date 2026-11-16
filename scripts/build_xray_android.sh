@@ -34,11 +34,6 @@ export ANDROID_NDK_HOME="$NDK"
 # check for the binary rather than trusting its self-report.
 command -v gomobile >/dev/null || { echo "error: gomobile not installed" >&2; exit 1; }
 
-case "$(uname -s)" in
-  Darwin) TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/darwin-x86_64" ;;
-  Linux)  TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64" ;;
-  *) echo "error: unsupported host $(uname -s)" >&2; exit 1 ;;
-esac
 
 mkdir -p "$OUT"
 cd "$MODULE"
@@ -55,36 +50,11 @@ gomobile bind -a \
 
 echo
 echo "==> verifying 16 KB page alignment"
-READELF="$TOOLCHAIN/bin/llvm-readelf"
-if [ ! -x "$READELF" ]; then
-  echo "error: llvm-readelf not found at $READELF" >&2
-  exit 1
-fi
-
-WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
-unzip -q "$OUT/XRay.aar" -d "$WORK"
-
-rc=0
-for abi in armeabi-v7a arm64-v8a x86_64; do
-  so="$WORK/jni/$abi/libgojni.so"
-  if [ ! -f "$so" ]; then
-    echo "   FAIL $abi: libgojni.so missing from the aar" >&2
-    rc=1
-    continue
-  fi
-  align="$("$READELF" -l "$so" | awk '/LOAD/{print $NF; exit}')"
-  if [ "$align" != "0x4000" ]; then
-    echo "   FAIL $abi: LOAD alignment $align, expected 0x4000" >&2
-    rc=1
-    continue
-  fi
-  echo "   ok   $abi: alignment $align"
-done
-if [ "$rc" -ne 0 ]; then
-  echo "   the aar would crash at dlopen on a 16 KB-page device" >&2
-  exit 1
-fi
+# Parses the ELF program headers rather than shelling out: llvm-readelf sits at
+# a different path on every NDK layout, and unzip is absent from some build
+# images. Both produced a silent failure in CI.
+python3 "$ROOT/scripts/verify_aar_alignment.py" "$OUT/XRay.aar" \
+  armeabi-v7a arm64-v8a x86_64
 
 echo
 echo "==> wrote $OUT/XRay.aar"
