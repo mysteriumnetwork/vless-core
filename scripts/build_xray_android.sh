@@ -35,6 +35,25 @@ export ANDROID_NDK_HOME="$NDK"
 command -v gomobile >/dev/null || { echo "error: gomobile not installed" >&2; exit 1; }
 
 
+case "$(uname -s)" in
+  Darwin) HOST_TAG="darwin-x86_64" ;;
+  Linux)  HOST_TAG="linux-x86_64" ;;
+  *) echo "error: unsupported host $(uname -s)" >&2; exit 1 ;;
+esac
+
+# gomobile stats this one clang once per Android arch it knows, regardless of
+# -target, and blames whichever arch its map happens to yield first. A missing
+# file therefore surfaces as a baffling "No compiler for 386". Check it here so
+# the real problem is the thing that gets reported.
+CLANG="$NDK/toolchains/llvm/prebuilt/$HOST_TAG/bin/clang"
+if [ ! -x "$CLANG" ]; then
+  echo "error: NDK clang not found at $CLANG" >&2
+  echo "  this NDK looks incomplete; it contains:" >&2
+  ls -1 "$NDK" >&2 2>/dev/null || echo "    (cannot list $NDK)" >&2
+  ls -1 "$NDK/toolchains/llvm/prebuilt" >&2 2>/dev/null || true
+  exit 1
+fi
+
 mkdir -p "$OUT"
 cd "$MODULE"
 

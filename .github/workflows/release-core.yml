@@ -100,22 +100,20 @@ jobs:
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Install the pinned NDK
-        id: ndk
-        uses: nttld/setup-ndk@v1
-        with:
-          # Must match the consuming app's ndkVersion: a different NDK links a
-          # different libc++.
-          ndk-version: r28c
-          local-cache: true
+        run: |
+          # By exact revision, via the SDK manager already on the image: it is
+          # the same revision the consuming app pins, and a different NDK links
+          # a different libc++. Named release channels (r28c and friends) are
+          # resolved by third parties and have arrived incomplete.
+          version="$(grep -oE 'NDK_VERSION:-[0-9.]+' scripts/build_xray_android.sh | cut -d- -f2-)"
+          echo "installing ndk;$version"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$version" >/dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$version" >> "$GITHUB_ENV"
 
       - name: Initialise gomobile
-        env:
-          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
         run: gomobile init
 
       - name: Build the aar
-        env:
-          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
         run: ./scripts/build_xray_android.sh
 
       - uses: actions/upload-artifact@v4
