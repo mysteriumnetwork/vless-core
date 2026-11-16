@@ -150,7 +150,10 @@ jobs:
         run: |
           # Both assets go up together: a release carrying only one of them
           # would let the platforms drift onto different cores.
+          # --repo because this job never checks the source out, and gh
+          # otherwise infers the repository from a git remote that is not here.
           gh release create "${{ steps.tag.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
             assets/xcframework/XRay.xcframework.zip \
             assets/aar/XRay.aar \
             --title "${{ steps.tag.outputs.tag }}" \
@@ -158,6 +161,7 @@ jobs:
 
           \`XRay.xcframework.zip\` SHA-256: \`${{ steps.apple.outputs.checksum }}\`" \
             || gh release upload "${{ steps.tag.outputs.tag }}" \
+                 --repo "${{ github.repository }}" \
                  assets/xcframework/XRay.xcframework.zip \
                  assets/aar/XRay.aar --clobber
 
