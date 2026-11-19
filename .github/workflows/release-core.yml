@@ -179,8 +179,14 @@ jobs:
           # them would let the platforms drift onto different cores.
           # --repo because this job never checks the source out, and gh
           # otherwise infers the repository from a git remote that is not here.
+          # --target pins the tag to the commit the assets were built from.
+          # Without it a run started by hand from a branch creates the tag on
+          # the default branch instead, leaving a release whose contents came
+          # from a commit the tag does not point at. Ignored when the tag
+          # already exists, which is the case when a tag push started the run.
           gh release create "${{ steps.tag.outputs.tag }}" \
             --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
             assets/xcframework/XRay.xcframework.zip \
             assets/aar/XRay.aar \
             assets/windows/vless_core.exe \
