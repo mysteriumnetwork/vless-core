@@ -45,10 +45,14 @@ var (
 	// What clients are told to query. Which resolver actually answers is
 	// decided by the config's own dns block, because dns-out intercepts the
 	// query whatever address it was sent to.
-	tunDNS = []netip.Addr{
-		netip.MustParseAddr("1.1.1.1"),
-		netip.MustParseAddr("1.0.0.1"),
-	}
+	//
+	// Inside the tunnel's own subnet rather than a public resolver: naming one
+	// lets the OS recognise it and upgrade to encrypted DNS on its own port,
+	// which no port-53 rule intercepts, so AAAA reaches the client. Android
+	// was measured doing exactly that; Windows 11 auto-upgrades known
+	// resolvers to DoH. Nothing answers those ports here. Not .1, which is
+	// the adapter's own address and would be answered locally.
+	tunDNS = []netip.Addr{netip.MustParseAddr("198.18.0.2")}
 )
 
 const (
