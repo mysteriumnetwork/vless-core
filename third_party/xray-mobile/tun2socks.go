@@ -55,6 +55,10 @@ func startTun2Socks(open func() (device.Device, error), socksAddr, user, pass st
 		return err
 	}
 
+	// Before the stack: gVisor would complete an IPv6 handshake before Xray
+	// could refuse one, and the client never falls back.
+	dev = &ipv4OnlyDevice{Device: dev}
+
 	proxy, err := socks5.New(socksAddr, user, pass)
 	if err != nil {
 		dev.Close()
