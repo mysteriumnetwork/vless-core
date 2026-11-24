@@ -1,4 +1,4 @@
-//go:build android || windows
+//go:build android || windows || linux
 
 package XRay
 
@@ -32,6 +32,10 @@ import (
 // The ::/0 route stays. IPv6 is still captured, so it cannot fall through to
 // the physical interface and leak the real address -- only the packets die.
 // Delete this once the exits carry IPv6.
+//
+// linux is in the build constraint purely so ipv4only_test.go runs: nothing
+// ships for it. Adding darwin instead would link a second TCP/IP stack into
+// the Network Extension, which is the one thing that must not happen.
 
 var droppedIPv6 atomic.Int64
 
