@@ -110,7 +110,25 @@ func ConfigureTun(cfg TunNetConfig) error {
 		return fmt.Errorf("set addresses: %w", err)
 	}
 
-	routes := make([]*winipcfg.RouteData, 0, len(defaultHalves))
+	families := []winipcfg.AddressFamily{windows.AF_INET}
+	if cfg.Address6.IsValid() {
+		families = append(families, windows.AF_INET6)
+	}
+
+	// Not SetRoutes, which flushes and adds in one call. Its flush reports the
+	// last delete failure even though it carried on, and a fresh adapter's
+	// auto-created routes -- link-local, multicast, the on-link subnet -- are
+	// routinely gone between being enumerated and being deleted. That returned
+	// "Element not found" before a single route had been added, which is
+	// exactly the failure this replaces.
+	for _, family := range families {
+		if err := luid.FlushRoutes(family); err != nil &&
+			!errors.Is(err, windows.ERROR_NOT_FOUND) {
+			unconfigureLocked(luid)
+			return fmt.Errorf("flush routes: %w", err)
+		}
+	}
+
 	for _, half := range defaultHalves {
 		if half.Addr().Is6() && !cfg.Address6.IsValid() {
 			continue
@@ -119,16 +137,12 @@ func ConfigureTun(cfg TunNetConfig) error {
 		if half.Addr().Is6() {
 			hop = netip.IPv6Unspecified()
 		}
-		routes = append(routes, &winipcfg.RouteData{Destination: half, NextHop: hop})
-	}
-	if err := luid.SetRoutes(routes); err != nil {
-		unconfigureLocked(luid)
-		return fmt.Errorf("set routes: %w", err)
-	}
-
-	families := []winipcfg.AddressFamily{windows.AF_INET}
-	if cfg.Address6.IsValid() {
-		families = append(families, windows.AF_INET6)
+		// Named individually: one prefix failing says which family and which
+		// half, where the batch call could only say that something did.
+		if err := luid.AddRoute(half, hop, 0); err != nil {
+			unconfigureLocked(luid)
+			return fmt.Errorf("add route %s: %w", half, err)
+		}
 	}
 	for _, family := range families {
 		if err := setInterfaceParams(luid, family, cfg.MTU); err != nil {
