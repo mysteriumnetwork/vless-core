@@ -23,8 +23,8 @@ if ProcessInfo.processInfo.environment["VLESS_LOCAL_CORE"] == "1" {
 } else {
   xrayCore = .binaryTarget(
     name: "XRay",
-    url: "https://github.com/mysteriumnetwork/vless-core/releases/download/xray-v26.3.27-6/XRay.xcframework.zip",
-    checksum: "97d0c1a1fc4343d9b02b7758ba24c5dd045cb189f010d1605406d8d4f378c2a2"
+    url: "https://github.com/mysteriumnetwork/vless-core/releases/download/xray-v26.3.27-8/XRay.xcframework.zip",
+    checksum: "16962e5b7a3cdb4a4a8546226e68dd3e07f70ee75ee04ca5645e040abe16c54a"
   )
 }
 
