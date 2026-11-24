@@ -21,8 +21,12 @@ check: build test test-go
 build-core:
 	./scripts/build_xray_apple.sh
 
+# Plain cross-compile; needs no Windows host, no cgo and no gomobile.
+build-core-windows:
+	./scripts/build_xray_windows.sh
+
 # Drop the local build so SwiftPM goes back to the published release.
 clean-core:
 	rm -rf Artifacts/XRay.xcframework
 
-.PHONY: build test test-go check build-core clean-core
+.PHONY: build test test-go check build-core build-core-windows clean-core
