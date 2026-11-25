@@ -15,10 +15,13 @@
 // The plugin is expected to put this process in a job object with
 // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, so an app crash cannot leave a
 // configured adapter behind.
+//
+// The protocol itself, and the ordering of starts and stops, is
+// internal/control. This file is what a start and a stop do on Windows.
 package main
 
 import (
-	"bufio"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -26,14 +29,15 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
-	"sync"
+	"syscall"
 
 	"golang.org/x/sys/windows"
 
 	XRay "github.com/mysteriumnetwork/vless-core/xray-mobile"
-	"github.com/mysteriumnetwork/vless-core/xray-mobile/internal/wire"
+	"github.com/mysteriumnetwork/vless-core/xray-mobile/internal/control"
 )
 
 // The tunnel's own parameters, matching what VlessVpnService hands
@@ -62,120 +66,46 @@ const (
 	probeTimeoutMs = 8000
 )
 
-var (
-	out   = bufio.NewWriter(os.Stdout)
-	outMu sync.Mutex
-
-	// Serialises start and stop. Xray keeps one package-wide instance, so a
-	// stop landing inside a start leaves it set and every later start fails
-	// with "xray is already running".
-	runMu   sync.Mutex
-	running bool
-)
-
 func main() {
 	// Before anything else: a previous run killed with the host app leaves its
 	// DNS policy behind, and that policy points the whole machine at a
 	// resolver that is no longer reachable.
 	XRay.ClearStaleDNSPolicy()
 
-	emit(wire.Fields{"event": "ready", "version": XRay.GetVersion()})
+	// A closing console, a logoff and a shutdown arrive as SIGTERM, and
+	// Windows ends the process a few seconds later whatever it is doing.
+	// Without this nothing ran in between, and the DNS policy stayed.
+	//
+	// Not to be leaned on for the last two. Windows stops sending them to a
+	// process once user32 is loaded into it, which a library can do without
+	// saying so. The plugin has a window and is told of a session ending
+	// through that; this covers the core when it is run by anything else.
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	interrupt := make(chan struct{})
+	go func() {
+		<-signals
+		close(interrupt)
+	}()
 
-	scanner := bufio.NewScanner(os.Stdin)
-	// Configs run to a few KB, and percent-encoding inflates them further.
-	// The default 64 KB cap would truncate one into a parse error that looks
-	// like a malformed request.
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		fields, err := wire.Decode(line)
-		if err != nil {
-			emit(wire.Fields{"event": "error", "message": fmt.Sprintf("parse request: %v", err)})
-			continue
-		}
-		handle(fields)
-	}
-
-	// stdin closed: the plugin is gone, so take the tunnel down rather than
-	// leaving the machine routed into a tunnel nothing is driving.
-	stop()
+	// Returns once stdin closes or the signal arrives, with the tunnel down.
+	control.Run(os.Stdin, os.Stdout, engine{}, interrupt)
 }
 
-// reply emits a response, tagging it with the request's id so the plugin can
-// match it. Commands sent without one (connect, disconnect) get no id field
-// rather than an empty one.
-func reply(id string, fields wire.Fields) {
-	if id != "" {
-		fields["id"] = id
-	}
-	emit(fields)
-}
+// engine is the tunnel on Windows: Xray, the bridge to a wintun adapter, the
+// interface configuration and the DNS policy, brought up in that order and
+// taken down in reverse.
+type engine struct{}
 
-func handle(req wire.Fields) {
-	id := req["id"]
-	switch req["cmd"] {
-	case "start":
-		if err := start(req["config"]); err != nil {
-			reply(id, wire.Fields{"event": "error", "message": err.Error()})
-			// Only when nothing is up. A start refused because a tunnel is
-			// already running tears nothing down, and reporting disconnected
-			// would leave the UI claiming so while traffic is still flowing.
-			if !isRunning() {
-				emit(wire.Fields{"event": "status", "status": "disconnected"})
-			}
-			return
-		}
-		reply(id, wire.Fields{"event": "started"})
-		emit(wire.Fields{"event": "status", "status": "connected"})
+func (engine) Version() string { return XRay.GetVersion() }
 
-	case "stop":
-		stop()
-		reply(id, wire.Fields{"event": "stopped"})
-
-	case "stats":
-		up, down := stats()
-		reply(id, wire.Fields{
-			"event":    "stats",
-			"uplink":   strconv.FormatInt(up, 10),
-			"downlink": strconv.FormatInt(down, 10),
-		})
-
-	case "version":
-		reply(id, wire.Fields{"event": "version", "version": XRay.GetVersion()})
-
-	default:
-		reply(id, wire.Fields{"event": "error", "message": "unknown command " + req["cmd"]})
-	}
-}
-
-func isRunning() bool {
-	runMu.Lock()
-	defer runMu.Unlock()
-	return running
-}
-
-func start(rawConfig string) (err error) {
-	runMu.Lock()
-	defer runMu.Unlock()
-
-	if running {
-		return errors.New("a tunnel is already running")
-	}
-	if rawConfig == "" {
-		return errors.New("no config")
-	}
+func (engine) Start(ctx context.Context, rawConfig string, _ func(error)) (err error) {
 	// Checked up front so the failure names the cause. Without it the first
 	// symptom is ACCESS_DENIED from wintun's adapter creation, several steps
 	// further in and far less obviously about privileges.
 	if !windows.GetCurrentProcessToken().IsElevated() {
 		return errors.New("the core must run elevated to create a tunnel adapter")
 	}
-
-	emit(wire.Fields{"event": "status", "status": "connecting"})
 
 	port, err := freePort()
 	if err != nil {
@@ -197,11 +127,18 @@ func start(rawConfig string) (err error) {
 	if err != nil {
 		return err
 	}
-	exit, err := resolveExit(server)
+	exit, err := resolveExit(ctx, server)
 	if err != nil {
 		return err
 	}
 	if config, err = XRay.PinProxyAddress(config, exit.String()); err != nil {
+		return err
+	}
+
+	// Between every step from here: none of them can be interrupted, and the
+	// adapter alone can take seconds the first time its driver is installed.
+	// A start that was called off meanwhile stops at the next one.
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 
@@ -215,6 +152,9 @@ func start(rawConfig string) (err error) {
 			XRay.Stop()
 		}
 	}()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	socksAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 	if err := XRay.StartTun2SocksTun(adapterName, socksAddr, user, pass, tunMTU); err != nil {
@@ -225,6 +165,9 @@ func start(rawConfig string) (err error) {
 			XRay.StopTun2Socks()
 		}
 	}()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	if err := XRay.ConfigureTun(XRay.TunNetConfig{
 		Address4: tunAddress4,
@@ -244,41 +187,35 @@ func start(rawConfig string) (err error) {
 	// Established is not the same as working: a server that refuses our
 	// credentials completes the handshake and then closes, which would
 	// otherwise be reported as a healthy tunnel.
-	if err := XRay.Probe(probeDomain, probeTimeoutMs); err != nil {
+	if err := XRay.ProbeContext(ctx, probeDomain, probeTimeoutMs); err != nil {
 		return err
 	}
 
-	running = true
+	// Last, and only for a tunnel that works and that nobody has called off.
+	// This is the one piece that does harm if the process dies holding it,
+	// so it is held for as short a time as there is.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := XRay.ApplyDNSPolicy(tunDNS); err != nil {
+		return fmt.Errorf("dns policy: %w", err)
+	}
 	return nil
 }
 
-func stop() {
-	runMu.Lock()
-	defer runMu.Unlock()
-
-	if !running {
-		// Still unwind: a failed start can leave pieces up, and stop is the
-		// only thing that runs when stdin closes.
-		XRay.UnconfigureTun()
-		XRay.StopTun2Socks()
-		XRay.Stop()
-		return
-	}
-
-	emit(wire.Fields{"event": "status", "status": "disconnecting"})
-
-	// Interface first: once the routes are gone the machine is back on its
-	// own default route, so tearing down the rest cannot strand traffic in a
-	// tunnel that no longer carries it.
+// Stop takes down whatever is up, whether a start finished or not.
+//
+// Interface first: that removes the DNS policy before anything else, and once
+// the routes are gone the machine is back on its own default route, so
+// tearing down the rest cannot strand traffic in a tunnel that no longer
+// carries it.
+func (engine) Stop() {
 	XRay.UnconfigureTun()
 	XRay.StopTun2Socks()
 	XRay.Stop()
-
-	running = false
-	emit(wire.Fields{"event": "status", "status": "disconnected"})
 }
 
-func stats() (uplink, downlink int64) {
+func (engine) Stats() (uplink, downlink int64) {
 	for _, line := range strings.Split(XRay.QueryStats("proxy"), "\n") {
 		name, value, ok := strings.Cut(line, ">>>")
 		if !ok {
@@ -301,7 +238,7 @@ func stats() (uplink, downlink int64) {
 // resolveExit turns the config's server address into the IPv4 literal the host
 // route needs. IPv4 only: the exits have no IPv6 egress, and a v6 host route
 // would not keep the proxy's own connection out of the tunnel.
-func resolveExit(server string) (netip.Addr, error) {
+func resolveExit(ctx context.Context, server string) (netip.Addr, error) {
 	if addr, err := netip.ParseAddr(server); err == nil {
 		if !addr.Is4() {
 			return netip.Addr{}, fmt.Errorf("server %s is not ipv4", server)
@@ -309,8 +246,11 @@ func resolveExit(server string) (netip.Addr, error) {
 		return addr, nil
 	}
 
-	ips, err := net.LookupIP(server)
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip4", server)
 	if err != nil {
+		if ctx.Err() != nil {
+			return netip.Addr{}, ctx.Err()
+		}
 		return netip.Addr{}, fmt.Errorf("resolve %s: %w", server, err)
 	}
 	for _, ip := range ips {
@@ -340,14 +280,4 @@ func credentials() (user, pass string, err error) {
 		return "", "", fmt.Errorf("mint socks credentials: %w", err)
 	}
 	return hex.EncodeToString(buf[:16]), hex.EncodeToString(buf[16:]), nil
-}
-
-// emit writes one message and flushes it. Flushed every time on purpose: the
-// plugin is waiting on these, and a buffered status change would arrive only
-// once something else happened to push it out.
-func emit(fields wire.Fields) {
-	outMu.Lock()
-	defer outMu.Unlock()
-	_, _ = out.WriteString(wire.Encode(fields) + "\n")
-	_ = out.Flush()
 }

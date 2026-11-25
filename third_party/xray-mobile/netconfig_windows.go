@@ -80,6 +80,9 @@ type TunNetConfig struct {
 //
 // Any failure rolls the whole thing back, so a half-configured interface never
 // outlives the call.
+//
+// It does not install the DNS policy. That is [ApplyDNSPolicy], and it comes
+// last.
 func ConfigureTun(cfg TunNetConfig) error {
 	netMu.Lock()
 	defer netMu.Unlock()
@@ -151,17 +154,13 @@ func ConfigureTun(cfg TunNetConfig) error {
 		}
 	}
 
+	// The adapter's own servers are not enough on their own: see the comment
+	// in nrpt_windows.go for why the query would otherwise still reach the
+	// LAN router in the clear.
 	if len(cfg.DNS) > 0 {
 		if err := luid.SetDNS(windows.AF_INET, cfg.DNS, nil); err != nil {
 			unconfigureLocked(luid)
 			return fmt.Errorf("set dns: %w", err)
-		}
-		// The adapter's own servers are not enough on their own: see the
-		// comment in nrpt_windows.go for why the query would otherwise still
-		// reach the LAN router in the clear.
-		if err := applyNRPT(cfg.DNS); err != nil {
-			unconfigureLocked(luid)
-			return err
 		}
 	}
 
