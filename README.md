@@ -128,6 +128,43 @@ The feature set is `third_party/xray-mobile/distro.go` — editing that file is
 how a protocol or transport gets added, and it is deliberately a visible,
 reviewable change.
 
+### The Windows core
+
+`third_party/xray-mobile/cmd/vless_core` is the same Xray and tun2socks as a
+process of its own, driven by the plugin over stdin and stdout. Windows hands
+a tunnel nothing, so the core also creates the adapter, assigns addresses and
+routes, and installs a DNS policy (NRPT) rule that sends every lookup on the
+machine into the tunnel.
+
+That rule is the one thing here that does harm when it outlives the process:
+left behind, nothing on the machine resolves. So:
+
+- It is installed last, once the tunnel is known to carry traffic, and
+  removed first on every way down.
+- It is a volatile registry key, gone at the next restart whoever is or is
+  not there to remove it. This is a backstop and not the mechanism: a
+  shutdown with Fast Startup hibernates the kernel rather than ending it, and
+  the key can be expected to come back with it.
+- A closed stdin and a console close take the tunnel down, and interrupt a
+  start that is still in flight. So do a logoff and a shutdown when Windows
+  tells the core about them, which it stops doing for a process that has
+  user32 loaded; the plugin is told through its window and does not depend
+  on it.
+- The core clears a leftover rule when it starts, and the plugin does the
+  same when the app starts.
+
+A killed core runs none of this. The plugin holds it in a job object that
+kills it with the app, which is why the plugin removes a leftover rule too.
+
+After a connect the core keeps the exit's host route on whatever the default
+route is now, so a change of network does not strand the tunnel, and reports
+the tunnel as lost if its adapter goes away.
+
+`internal/control` is the protocol and the ordering of starts and stops, and
+is tested on every platform. The files ending `_windows.go` are tested by the
+`windows` CI job against a real registry and route table. Nothing in CI brings
+a tunnel up: that needs the wintun driver and an exit.
+
 ### Publishing a new core
 
 The artifact is ~59 MB and rebuilt on every Xray bump, so it is not committed.

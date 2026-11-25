@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/netip"
 	"strings"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
@@ -40,6 +41,9 @@ const (
 
 	// Named rather than a GUID so a rule left behind by a crash is
 	// recognisable, both to us at startup and to anyone reading the registry.
+	// The plugin removes a leftover by this name too, when the core is in no
+	// state to: kCoreDnsRule in vless_dart's windows/dns_policy.cpp has to
+	// match.
 	nrptRuleName = "MysteriumVlessDns"
 
 	// A single "." matches every namespace.
@@ -50,8 +54,22 @@ const (
 	nrptVersion                 = 2
 )
 
-// applyNRPT points all name resolution at [servers] until [removeNRPT] runs.
-func applyNRPT(servers []netip.Addr) error {
+// ApplyDNSPolicy points all name resolution at [servers] until
+// [UnconfigureTun] runs.
+//
+// Its own step rather than part of [ConfigureTun], and the last one of a
+// start: this rule is the one thing here that does harm when it outlives the
+// process, so it goes in only once the tunnel is known to carry traffic.
+// Until then lookups go where they went before the connect, which nobody was
+// promised otherwise.
+func ApplyDNSPolicy(servers []netip.Addr) error {
+	netMu.Lock()
+	defer netMu.Unlock()
+	return writeNRPTRule(nrptBaseKey(), nrptRuleName, []string{nrptAllNamespaces}, servers)
+}
+
+// writeNRPTRule installs [rule] under the table at [base].
+func writeNRPTRule(base, rule string, namespaces []string, servers []netip.Addr) error {
 	if len(servers) == 0 {
 		return nil
 	}
@@ -61,11 +79,21 @@ func applyNRPT(servers []netip.Addr) error {
 		addresses = append(addresses, server.String())
 	}
 
-	key, _, err := registry.CreateKey(
-		registry.LOCAL_MACHINE,
-		nrptBaseKey()+`\`+nrptRuleName,
-		registry.SET_VALUE,
-	)
+	// The table itself is created permanent when it is missing. Left to the
+	// call below it would be created volatile along with the rule, and a
+	// volatile key cannot hold a permanent one: every other VPN's rule would
+	// then fail to install until the next reboot.
+	table, _, err := registry.CreateKey(registry.LOCAL_MACHINE, base, registry.CREATE_SUB_KEY)
+	if err != nil {
+		return fmt.Errorf("open nrpt table: %w", err)
+	}
+	defer table.Close()
+
+	// Creating over a key that exists opens it as it is, and one left by a
+	// core older than this is permanent.
+	_ = registry.DeleteKey(table, rule)
+
+	key, err := createVolatileKey(table, rule)
 	if err != nil {
 		return fmt.Errorf("create nrpt rule: %w", err)
 	}
@@ -74,7 +102,7 @@ func applyNRPT(servers []netip.Addr) error {
 	if err := key.SetDWordValue("Version", nrptVersion); err != nil {
 		return fmt.Errorf("nrpt version: %w", err)
 	}
-	if err := key.SetStringsValue("Name", []string{nrptAllNamespaces}); err != nil {
+	if err := key.SetStringsValue("Name", namespaces); err != nil {
 		return fmt.Errorf("nrpt name: %w", err)
 	}
 	if err := key.SetStringValue("GenericDNSServers", strings.Join(addresses, ";")); err != nil {
@@ -93,6 +121,46 @@ func applyNRPT(servers []netip.Addr) error {
 	// the adapter pointed at, and would keep being served from the cache.
 	flushDNSCache()
 	return nil
+}
+
+const regOptionVolatile = 0x1
+
+var procRegCreateKeyExW = windows.NewLazySystemDLL("advapi32.dll").
+	NewProc("RegCreateKeyExW")
+
+// createVolatileKey creates a key that is never written to disk.
+//
+// Nothing runs on the way out when this process is killed, so the rule is
+// made to not outlive the boot it was written in: a restart or a full
+// shutdown drops it whoever is or is not there to remove it.
+//
+// A backstop, not the mechanism. A shutdown with Fast Startup, the default,
+// hibernates the kernel rather than ending it, and a key held in its memory
+// can be expected to come back with it. Removal is still what the plugin and
+// the startup of this process are for.
+//
+// The registry package has no way to ask for this, hence the direct call.
+func createVolatileKey(parent registry.Key, name string) (registry.Key, error) {
+	path, err := windows.UTF16PtrFromString(name)
+	if err != nil {
+		return 0, err
+	}
+	var handle windows.Handle
+	status, _, _ := procRegCreateKeyExW.Call(
+		uintptr(parent),
+		uintptr(unsafe.Pointer(path)),
+		0,
+		0,
+		regOptionVolatile,
+		uintptr(registry.SET_VALUE),
+		0,
+		uintptr(unsafe.Pointer(&handle)),
+		0,
+	)
+	if status != 0 {
+		return 0, windows.Errno(status)
+	}
+	return registry.Key(handle), nil
 }
 
 // ClearStaleDNSPolicy removes a rule left behind by a previous run.
@@ -120,12 +188,16 @@ func nrptBaseKey() string {
 
 // removeNRPT drops the rule. Safe to call when none is installed.
 func removeNRPT() {
+	deleteNRPTRule(nrptRuleName)
+}
+
+func deleteNRPTRule(rule string) {
 	// From both tables rather than from whichever one nrptBaseKey picks now:
 	// the Group Policy table can appear or disappear between applying a rule
 	// and dropping it, and the copy left behind would be the one still in
 	// force.
 	for _, base := range []string{nrptLocalKeyPath, nrptPolicyKeyPath} {
-		_ = registry.DeleteKey(registry.LOCAL_MACHINE, base+`\`+nrptRuleName)
+		_ = registry.DeleteKey(registry.LOCAL_MACHINE, base+`\`+rule)
 	}
 	// Deleting the key is what lifts the policy; the flush drops answers
 	// resolved while it was in force.

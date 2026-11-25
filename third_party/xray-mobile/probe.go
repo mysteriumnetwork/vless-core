@@ -1,6 +1,7 @@
 package XRay
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -19,6 +20,13 @@ const (
 // then closes without answering, so this is what separates a working tunnel
 // from one that only looks connected.
 func Probe(domain string, timeoutMs int) error {
+	return probe(context.Background(), domain, timeoutMs)
+}
+
+// probe is [Probe] with a way to give up early. Not exported from here: the
+// mobile bindings cannot carry a context, and only the Windows core has a
+// caller that can be interrupted.
+func probe(ctx context.Context, domain string, timeoutMs int) error {
 	mu.Lock()
 	instance := running
 	mu.Unlock()
@@ -45,13 +53,18 @@ func Probe(domain string, timeoutMs int) error {
 		done <- err
 	}()
 
+	timeout := time.NewTimer(time.Duration(timeoutMs) * time.Millisecond)
+	defer timeout.Stop()
+
 	select {
 	case err := <-done:
 		if err != nil {
 			return fmt.Errorf("resolve %s through the tunnel: %w", domain, err)
 		}
 		return nil
-	case <-time.After(time.Duration(timeoutMs) * time.Millisecond):
+	case <-timeout.C:
 		return fmt.Errorf("resolving %s through the tunnel timed out after %dms", domain, timeoutMs)
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
