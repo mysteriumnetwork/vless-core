@@ -13,13 +13,48 @@ import (
 
 	"github.com/xjasonlyu/tun2socks/v2/core"
 	"github.com/xjasonlyu/tun2socks/v2/core/device"
+	t2slog "github.com/xjasonlyu/tun2socks/v2/log"
 	"github.com/xjasonlyu/tun2socks/v2/proxy/socks5"
 	"github.com/xjasonlyu/tun2socks/v2/tunnel"
+	glog "gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
 // defaultMTU matches the tunnel MTU the clients configure.
 const defaultMTU = 1500
+
+// bridgeLogLevel is the lowest level the bridge may log at.
+//
+// tun2socks installs a logger of its own at Info, and at Info it writes a
+// line for every flow it carries, with the destination; at Warn, one for
+// every dial that fails, with the destination again. They go to stderr,
+// which gomobile forwards to logcat on Android and which is the plugin's
+// pipe on Windows, so left alone it is a record of where the user went, kept
+// by a VPN. Everything that names a destination is below Error, and nothing
+// in the pieces linked here logs at Error or above, so this is silence in
+// practice.
+const bridgeLogLevel = t2slog.ErrorLevel
+
+func init() {
+	// After tun2socks's own init, which this package imports and so runs
+	// first.
+	quietBridge()
+}
+
+// quietBridge replaces the logger tun2socks installed for itself.
+func quietBridge() {
+	logger, err := t2slog.NewLeveled(bridgeLogLevel)
+	if err != nil {
+		// Its own logger stays, which is the behaviour before this existed.
+		return
+	}
+	t2slog.SetLogger(logger)
+	// SetLogger also levels gVisor's logger from the one it is given, as
+	// 1 minus the level in an unsigned type: for anything above Warn that
+	// wraps round to "everything". None of it would be written, since it all
+	// arrives at the logger above, but each line would be put together first.
+	glog.SetLevel(glog.Warning)
+}
 
 var (
 	tunMu     sync.Mutex
