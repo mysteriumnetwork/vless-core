@@ -31,6 +31,9 @@ open class VlessPacketTunnelProvider: NEPacketTunnelProvider {
     private let runtimeQueue = DispatchQueue(label: "com.mysteriumvpn.vless.runtime")
     /// True once startup reported success. Only touched on `runtimeQueue`.
     private var started = false
+    /// Raised by `stopTunnel` before it queues its teardown, so a start that is
+    /// still on `runtimeQueue` gives up instead of making the stop wait.
+    private let stopSignal = StopSignal()
     private var footprintTimer: DispatchSourceTimer?
 
     override public init() { super.init() }
@@ -40,6 +43,7 @@ open class VlessPacketTunnelProvider: NEPacketTunnelProvider {
         completionHandler: @escaping (Error?) -> Void
     ) {
         os_log("[TUNNEL] startTunnel", log: log, type: .info)
+        stopSignal.reset()
 
         guard let proto = protocolConfiguration as? NETunnelProviderProtocol else {
             os_log("[TUNNEL] protocolConfiguration is not NETunnelProviderProtocol",
@@ -111,6 +115,11 @@ open class VlessPacketTunnelProvider: NEPacketTunnelProvider {
             os_log("[TUNNEL] network settings applied", log: log, type: .info)
             self.runtimeQueue.async {
                 do {
+                    // A stop that came while the settings were being applied
+                    // has already run its teardown, on this queue, with
+                    // nothing yet to tear down. Starting now would bring the
+                    // tunnel up behind it.
+                    if self.stopSignal.isRaised { throw TunnelRuntimeError.cancelled }
                     try self.startRuntime(pinned)
                     self.reasserting = false
                     self.started = true
@@ -128,6 +137,9 @@ open class VlessPacketTunnelProvider: NEPacketTunnelProvider {
 
     override open func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
         os_log("[TUNNEL] stopTunnel: %d", log: log, type: .info, reason.rawValue)
+        // Before the teardown is queued: a start still on the queue checks
+        // this, and without it the stop would sit behind the whole probe.
+        stopSignal.raise()
         // On runtimeQueue so a stop during startup waits for it instead of
         // racing it. XRayStop() landing before XRayStart() returns leaves Go's
         // instance set, and every later connect fails with "already running".
@@ -206,11 +218,31 @@ open class VlessPacketTunnelProvider: NEPacketTunnelProvider {
             if vless_ipv4_socks5_forwarder_failed() != 0 {
                 throw TunnelRuntimeError.forwarderFailed
             }
-            return
         case let .exited(code):
             throw TunnelRuntimeError.workerExited(code: code)
         case .neverStarted:
             throw TunnelRuntimeError.workerNeverStarted
+        }
+
+        try probeTunnel()
+    }
+
+    /// Everything is up. Whether anything gets through is a separate question,
+    /// and the one the user cares about: a server that is down or refuses the
+    /// credentials looks exactly like a working one until the first packet.
+    /// Android and Windows ask it the same way before they report connected.
+    private func probeTunnel() throws {
+        os_log("[TUNNEL] probing", log: log, type: .info)
+        let outcome = TunnelReadiness.check(isCancelled: { [stopSignal] in stopSignal.isRaised }) {
+            try ExitProbe.run()
+        }
+        switch outcome {
+        case .ready:
+            return
+        case .cancelled:
+            throw TunnelRuntimeError.cancelled
+        case let .failed(reason):
+            throw TunnelRuntimeError.probeFailed(reason)
         }
     }
 
