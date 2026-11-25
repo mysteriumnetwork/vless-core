@@ -28,7 +28,21 @@ App Sandbox with network client and server on macOS).
 The app hands the extension an Xray JSON config. The provider picks a free
 loopback port, mints per-session SOCKS credentials, starts Xray, then starts
 hev-socks5-tunnel to move packets between the system tunnel interface and that
-SOCKS inbound. IPv4 and IPv6 are both captured so neither leaks around the
+SOCKS inbound.
+
+Before it reports the tunnel as connected it resolves one name through the
+proxy, with an eight-second limit, as Android and Windows do. Xray dials its
+server only when there is something to carry, so without this a server that is
+down, or that refuses the credentials, starts exactly like a healthy one: the
+system shows Connected and nothing gets through. A failed probe fails the
+connect instead. A disconnect during it is not kept waiting.
+
+The probe means what it says only while the config's port-53 routing rule
+stays scoped to the SOCKS inbound. Unscoped, the rule also catches Xray's own
+lookups, which are then sent from the device directly: the probe passes with no
+server behind it, and every lookup the user makes leaves the tunnel.
+
+IPv4 and IPv6 are both captured so neither leaks around the
 tunnel. The exits are IPv4-only: a bounded datagram adapter passes IPv4 to hev
 unchanged and discards IPv6 before its TCP/IP stack processes it. Consequently
 an IPv6 SYN never receives a synthetic SYN-ACK, allowing applications with

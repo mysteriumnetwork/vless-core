@@ -10,10 +10,12 @@ import (
 )
 
 // The exact shape lib/src/xray_config.dart emits, with the placeholder port and
-// credentials the tunnel provider fills at startup.
+// credentials the tunnel provider fills at startup. Regenerate it, do not edit
+// it: `fvm dart run tool/emit_cfg.dart` in vless_dart prints this text.
 const dartConfig = `{
   "log": {
-    "loglevel": "warning"
+    "loglevel": "warning",
+    "access": "none"
   },
   "dns": {
     "servers": [
@@ -79,7 +81,10 @@ const dartConfig = `{
         "security": "tls",
         "tlsSettings": {
           "serverName": "supervpn-testnet-01.mysterium.network",
-          "allowInsecure": false
+          "allowInsecure": false,
+          "alpn": [
+            "http/1.1"
+          ]
         },
         "wsSettings": {
           "path": "/vless",
@@ -107,6 +112,9 @@ const dartConfig = `{
     "rules": [
       {
         "type": "field",
+        "inboundTag": [
+          "socks-in"
+        ],
         "port": 53,
         "outboundTag": "dns-out"
       }
@@ -188,6 +196,44 @@ func TestEmittedConfigResolvesIPv4Only(t *testing.T) {
 
 	if !IsRunning() {
 		t.Fatal("xray reported not running after a successful start")
+	}
+}
+
+// The config with its server swapped for one that is not there.
+func configWithDeadServer(t *testing.T) string {
+	t.Helper()
+	config := strings.Replace(dartConfig,
+		`"address": "supervpn-testnet-01.mysterium.network"`, `"address": "127.0.0.1"`, 1)
+	// Nothing listens on the discard port.
+	config = strings.Replace(config, `"port": 443`, `"port": 9`, 1)
+	if config == dartConfig || !strings.Contains(config, `"port": 9`) {
+		t.Fatal("the fixture no longer names its server the way this expects")
+	}
+	return config
+}
+
+// The probe is what every platform reports "connected" on, so it has to fail
+// when the server cannot be reached.
+//
+// It once could not. The port-53 rule that hands client DNS to the dns
+// outbound also caught Xray's own lookups, and the dns outbound sends those
+// from the device directly: the probe was answered by the nearest public
+// resolver with no server involved, and every lookup the user made left the
+// tunnel in plaintext. Scoping the rule to the SOCKS inbound fixed both, and
+// this is what notices if it comes unscoped again. It needs a machine that can
+// reach a public resolver to notice; without one the probe fails either way.
+func TestTheProbeFailsWhenTheServerIsNotThere(t *testing.T) {
+	if !strings.Contains(dartConfig, `"inboundTag"`) {
+		t.Fatal("the port-53 rule is no longer scoped to an inbound")
+	}
+
+	if err := Start([]byte(configWithDeadServer(t))); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer Stop()
+
+	if err := Probe("cloudflare.com", 3000); err == nil {
+		t.Fatal("a tunnel with no server behind it passed the probe")
 	}
 }
 

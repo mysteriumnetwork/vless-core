@@ -12,6 +12,10 @@ public enum TunnelRuntimeError: Error, Equatable {
     case workerNeverStarted
     /// The packet bridge's forwarding thread died before the tunnel was up.
     case forwarderFailed
+    /// Everything started, and nothing got through to the server and back.
+    case probeFailed(String)
+    /// A stop arrived while the tunnel was still coming up.
+    case cancelled
 }
 
 /// Coordinates the tun2socks worker, which runs a blocking call on its own
