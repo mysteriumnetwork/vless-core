@@ -3,6 +3,10 @@ name: CI
 # Swift and Go. Both run without signing now that the tunnel engine is its own
 # package: the suite used to need a signed macOS app because it lived inside a
 # Flutter example carrying a NetworkExtension entitlement.
+#
+# Go runs twice. Linux has the suite every platform shares; Windows has the
+# files only the Windows core is built from, which Linux does not compile at
+# all, and the registry and route table they are tested against.
 
 on:
   push:
@@ -16,6 +20,7 @@ concurrency:
 jobs:
   swift:
     runs-on: macos-15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -28,6 +33,7 @@ jobs:
 
   go:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -40,8 +46,43 @@ jobs:
         working-directory: third_party/xray-mobile
         run: go test ./...
 
+      # The protocol loop is ordering between goroutines and little else, so
+      # it is run under the race detector, and often enough for a rare
+      # interleaving to come up. Not the whole module: Xray's own races are
+      # not ours to fail a build on.
+      - name: Race-test the protocol loop
+        working-directory: third_party/xray-mobile
+        run: go test -race -count=50 ./internal/...
+
+      # Fails here in seconds rather than in the Windows job in minutes.
+      - name: Vet the Windows build
+        working-directory: third_party/xray-mobile
+        run: GOOS=windows go vet ./...
+
       - name: go.mod is tidy
         working-directory: third_party/xray-mobile
         run: |
           go mod tidy
           git diff --exit-code go.mod go.sum
+
+  windows:
+    # The hosted runner is elevated, which the tests that write the DNS
+    # policy and the route table need; they skip themselves otherwise, so
+    # -v is what shows they ran.
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: third_party/xray-mobile/go.mod
+          cache-dependency-path: third_party/xray-mobile/go.sum
+
+      - name: Test
+        working-directory: third_party/xray-mobile
+        run: go test -v ./...
+
+      - name: Build the core
+        working-directory: third_party/xray-mobile
+        run: go build -o "$env:RUNNER_TEMP\vless_core.exe" ./cmd/vless_core
