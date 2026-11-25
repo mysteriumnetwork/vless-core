@@ -99,7 +99,7 @@ type engine struct{}
 
 func (engine) Version() string { return XRay.GetVersion() }
 
-func (engine) Start(ctx context.Context, rawConfig string, _ func(error)) (err error) {
+func (engine) Start(ctx context.Context, rawConfig string, onLost func(error)) (err error) {
 	// Checked up front so the failure names the cause. Without it the first
 	// symptom is ACCESS_DENIED from wintun's adapter creation, several steps
 	// further in and far less obviously about privileges.
@@ -175,6 +175,7 @@ func (engine) Start(ctx context.Context, rawConfig string, _ func(error)) (err e
 		DNS:      tunDNS,
 		ExitIP:   exit,
 		MTU:      tunMTU,
+		OnLost:   onLost,
 	}); err != nil {
 		return fmt.Errorf("configure interface: %w", err)
 	}

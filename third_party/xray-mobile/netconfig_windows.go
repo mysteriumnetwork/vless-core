@@ -72,6 +72,12 @@ type TunNetConfig struct {
 	// ExitIP is the proxy endpoint, which must stay reachable off-tunnel.
 	ExitIP netip.Addr
 	MTU    uint32
+	// OnLost is told when the adapter goes away under a configured tunnel,
+	// at most once. Nothing else would say so: the routes go with the
+	// adapter, traffic falls back to the physical interface, and the tunnel
+	// would still be reported as up. Called on the watcher's own goroutine,
+	// so it must not block and must not call back into this package.
+	OnLost func(error)
 }
 
 // ConfigureTun assigns the addresses, routes and DNS for the adapter opened by
@@ -164,6 +170,7 @@ func ConfigureTun(cfg TunNetConfig) error {
 		}
 	}
 
+	startWatchLocked(luid, cfg.OnLost)
 	return nil
 }
 
@@ -178,6 +185,7 @@ func UnconfigureTun() {
 		// The adapter is already gone, which takes its own configuration with
 		// it. The exit route and the DNS policy live outside the adapter and
 		// are not covered by that, so they still have to go.
+		stopWatchLocked()
 		removeNRPT()
 		removeExitRouteLocked()
 		return
@@ -189,7 +197,10 @@ func unconfigureLocked(luid winipcfg.LUID) {
 	// Best effort throughout: this runs on failure paths, where the thing
 	// being undone may never have been applied.
 	//
-	// The policy first. It outlives the adapter, so leaving it in place while
+	// The watcher before anything it watches, or it would read this teardown
+	// as the adapter being lost.
+	stopWatchLocked()
+	// Then the policy. It outlives the adapter, so leaving it in place while
 	// the rest goes would point every lookup on the machine at a resolver
 	// reached through a tunnel that no longer exists.
 	removeNRPT()
