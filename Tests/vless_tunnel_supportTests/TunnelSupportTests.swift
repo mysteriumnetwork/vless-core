@@ -262,6 +262,47 @@ final class TunnelBridgeConfigurationTests: XCTestCase {
         )
         XCTAssertTrue(yaml.contains("username: 'a''b'"))
     }
+
+    private typealias Limits = TunnelBridgeConfiguration.Limits
+
+    /// The buffer is allocated on the session's stack, so a stack sized
+    /// separately from it is a stack overflow waiting for the next edit.
+    func testTheStackAlwaysHoldsTheBuffer() {
+        for limits in [Limits.constrained, Limits.roomy] {
+            XCTAssertEqual(limits.taskStackSize, 20480 + limits.tcpBufferSize)
+        }
+    }
+
+    func testCarriesTheLimitsItIsGiven() throws {
+        let yaml = TunnelBridgeConfiguration.yaml(
+            socksPort: 1,
+            credentials: try ProxyCredentials(username: "u", password: "p"),
+            mtu: 1500,
+            logPath: "/tmp/hev.log",
+            limits: .constrained
+        )
+        XCTAssertTrue(yaml.contains("task-stack-size: 24576"))
+        XCTAssertTrue(yaml.contains("tcp-buffer-size: 4096"))
+        XCTAssertTrue(yaml.contains("max-session-count: \(Limits.constrained.maxSessionCount)"))
+    }
+
+    /// A full bridge measured 44 MB at these values, and iOS ends the
+    /// extension at roughly 50. Neither is to be raised without measuring it
+    /// again: the cap is the only thing that bounds the extension's memory.
+    func testTheConstrainedLimitsStayAtWhatWasMeasured() {
+        XCTAssertLessThanOrEqual(Limits.constrained.tcpBufferSize, 4096)
+        XCTAssertLessThanOrEqual(Limits.constrained.maxSessionCount, 128)
+    }
+
+    /// macOS has no such ceiling, and a desktop holds more connections open.
+    func testOnlyIOSIsConstrained() throws {
+        #if os(iOS)
+        XCTAssertEqual(Limits.platform, .constrained)
+        #else
+        XCTAssertEqual(Limits.platform, .roomy)
+        #endif
+        XCTAssertTrue(try config().contains("max-session-count: \(Limits.platform.maxSessionCount)"))
+    }
 }
 
 final class TunnelWorkerLifecycleTests: XCTestCase {
