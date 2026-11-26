@@ -22,17 +22,21 @@ public enum TunnelBridgeConfiguration {
         /// Derived, never set: the buffer is allocated on this stack.
         public var taskStackSize: Int { Self.stackOverhead + tcpBufferSize }
 
-        /// For iOS, which ends a packet tunnel at roughly 50 MB.
+        /// For iOS, which ends a packet tunnel at 50 MB.
         ///
         /// The buffer is the bridge's own recommendation for an extension: it
         /// takes a session from about 185 KB to 125 KB, with no loss of
         /// throughput at the 35 Mbit/s the test exit could carry.
         ///
-        /// The cap is what was measured, on macOS: 44 MB with every session a
-        /// live TLS connection and 47 MB while 300 connections arrived in six
-        /// seconds, against 84 MB for the same load before. At 96 the bridge
-        /// began resetting connections that were still being set up. Not yet
-        /// measured on a device.
+        /// Measured on an iPhone holding 200 connections open: 37.8 MB, flat
+        /// once the cap was reached, against 48.5 MB and still rising with
+        /// the limits this replaced. The 50 MB is measured too: what the
+        /// system reported as left, plus the footprint, came to it every time.
+        ///
+        /// On macOS, where the system's own traffic fills the cap as well, the
+        /// same limits held 44 MB, and 47 MB while 300 connections arrived in
+        /// six seconds. At 96 the bridge began resetting connections that
+        /// were still being set up.
         public static let constrained = Limits(tcpBufferSize: 4096, maxSessionCount: 128)
 
         /// Where nothing ends the process for its size.

@@ -286,8 +286,8 @@ final class TunnelBridgeConfigurationTests: XCTestCase {
         XCTAssertTrue(yaml.contains("max-session-count: \(Limits.constrained.maxSessionCount)"))
     }
 
-    /// A full bridge measured 44 MB at these values, and iOS ends the
-    /// extension at roughly 50. Neither is to be raised without measuring it
+    /// A full bridge measured 37.8 MB on an iPhone at these values, and iOS
+    /// ends the extension at 50. Neither is to be raised without measuring it
     /// again: the cap is the only thing that bounds the extension's memory.
     func testTheConstrainedLimitsStayAtWhatWasMeasured() {
         XCTAssertLessThanOrEqual(Limits.constrained.tcpBufferSize, 4096)
